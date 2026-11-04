@@ -40,7 +40,6 @@ IMAGE_PATH = PROJECT_DIR / "img" / "StaffFlow-Redonda.png"
 DATABASE_PATH = Path("/data/staffflow.db")
 
 HORARIOS = [
-    "10:00", "11:00", "12:00", "13:00", "14:00",
     "15:00", "16:00", "17:00", "18:00", "19:00",
     "20:00", "21:00", "22:00", "23:00", "00:00+"
 ]
@@ -286,7 +285,7 @@ async def publicar_votacoes_reacoes(guild: discord.Guild, canal_id: int | None =
         await mensagem.add_reaction("❌")
 
 
-@tasks.loop(time=time(hour=0, minute=0, tzinfo=FUSO_HORARIO))
+@tasks.loop(time=time(hour=7, minute=0, tzinfo=FUSO_HORARIO))
 async def enviar_votacoes_diarias():
     for guild in bot.guilds:
         try:
