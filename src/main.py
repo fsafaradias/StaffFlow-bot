@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -12,23 +13,15 @@ from discord.ext import commands, tasks
 
 from dotenv import load_dotenv
 
-import os
-
-token = os.getenv("DISCORD_TOKEN")
-
-if not token:
-    raise RuntimeError("DISCORD_TOKEN não está configurado!")
-
-
 # =========================================================
-# CONFIGURACAO
+# CONFIGURAÇÃO
 # =========================================================
 
 try:
     FUSO_HORARIO = ZoneInfo("Europe/Lisbon")
 except ZoneInfoNotFoundError as erro:
     raise RuntimeError(
-        "Nao foi encontrada a base de fusos horarios. "
+        "Não foi encontrada a base de fusos horários. "
         "Instala-a com: python -m pip install tzdata"
     ) from erro
 
@@ -54,23 +47,33 @@ HORARIOS = [
 
 
 # =========================================================
-# BASE DE DADOS
+# BASE DE DADOS E MIGRAÇÕES
 # =========================================================
 
 def iniciar_database():
     with sqlite3.connect(DATABASE_PATH) as db:
+        tabelas = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        
+        if "configuracao_disponibilidade" in tabelas:
+            colunas = [col[1] for col in db.execute("PRAGMA table_info(configuracao_disponibilidade)").fetchall()]
+            if "guild_id" not in colunas:
+                db.execute("ALTER TABLE configuracao_disponibilidade RENAME TO configuracao_disponibilidade_old")
+                tabelas.append("configuracao_disponibilidade_old")
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS configuracao_disponibilidade (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
+                guild_id INTEGER PRIMARY KEY,
                 canal_id INTEGER NOT NULL
             )
         """)
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS paineis_abas_staffflow (
                 message_id INTEGER PRIMARY KEY,
                 guild_id INTEGER NOT NULL,
                 categoria_id INTEGER,
-                prefixo TEXT NOT NULL DEFAULT ''
+                prefixo TEXT NOT NULL DEFAULT '',
+                mensagem_inicial TEXT
             )
         """)
 
@@ -87,44 +90,69 @@ def iniciar_database():
             )
         """)
 
-def guardar_canal_disponibilidade(canal_id):
+        colunas_abas = [
+            coluna[1]
+            for coluna in db.execute("PRAGMA table_info(paineis_abas_staffflow)").fetchall()
+        ]
+
+        if "mensagem_inicial" not in colunas_abas:
+            db.execute("""
+                ALTER TABLE paineis_abas_staffflow
+                ADD COLUMN mensagem_inicial TEXT
+            """)
+
+
+def guardar_canal_disponibilidade(guild_id: int, canal_id: int):
     with sqlite3.connect(DATABASE_PATH) as db:
         db.execute("""
-            INSERT OR REPLACE INTO configuracao_disponibilidade (id, canal_id)
-            VALUES (1, ?)
-        """, (canal_id,))
+            INSERT OR REPLACE INTO configuracao_disponibilidade (guild_id, canal_id)
+            VALUES (?, ?)
+        """, (guild_id, canal_id))
 
 
-def obter_canal_disponibilidade_id():
+def obter_canal_disponibilidade_id(guild_id: int):
     with sqlite3.connect(DATABASE_PATH) as db:
         resultado = db.execute("""
             SELECT canal_id
             FROM configuracao_disponibilidade
-            WHERE id = 1
-        """).fetchone()
+            WHERE guild_id = ?
+        """, (guild_id,)).fetchone()
 
     return resultado[0] if resultado else None
 
-def guardar_painel_abas(message_id, guild_id, categoria_id, prefixo):
+
+def guardar_painel_abas(
+    message_id: int,
+    guild_id: int,
+    categoria_id: int | None,
+    prefixo: str,
+    mensagem_inicial: str | None
+):
     with sqlite3.connect(DATABASE_PATH) as db:
         db.execute("""
             INSERT OR REPLACE INTO paineis_abas_staffflow
-                (message_id, guild_id, categoria_id, prefixo)
-            VALUES (?, ?, ?, ?)
-        """, (message_id, guild_id, categoria_id, prefixo))
+            (message_id, guild_id, categoria_id, prefixo, mensagem_inicial)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            message_id,
+            guild_id,
+            categoria_id,
+            prefixo,
+            mensagem_inicial
+        ))
 
 
 def obter_paineis_abas():
     with sqlite3.connect(DATABASE_PATH) as db:
         return db.execute("""
-            SELECT message_id, guild_id, categoria_id, prefixo
+            SELECT message_id, guild_id, categoria_id, prefixo, mensagem_inicial
             FROM paineis_abas_staffflow
         """).fetchall()
 
 
 def guardar_ticket_panel(
-    panel_id, guild_id, channel_id, message_id,
-    category_id, title, description, buttons
+    panel_id: str, guild_id: int, channel_id: int, message_id: int,
+    category_id: int, title: str, description: str, buttons: list
 ):
     with sqlite3.connect(DATABASE_PATH) as db:
         db.execute("""
@@ -150,10 +178,10 @@ def obter_ticket_panels():
 
 
 # =========================================================
-# FUNCOES AUXILIARES
+# FUNÇÕES AUXILIARES
 # =========================================================
 
-def criar_embed_abas(texto, titulo):
+def criar_embed_abas(texto: str, titulo: str):
     embed = discord.Embed(
         title=titulo,
         description=texto,
@@ -163,7 +191,7 @@ def criar_embed_abas(texto, titulo):
     return embed
 
 
-def criar_embed_ticket(titulo, descricao):
+def criar_embed_ticket(titulo: str, descricao: str):
     embed = discord.Embed(
         title=titulo,
         description=descricao,
@@ -173,15 +201,14 @@ def criar_embed_ticket(titulo, descricao):
     return embed
 
 
-def nome_canal_seguro(texto, limite=100):
-    """Normaliza espaços e caracteres de controlo no nome do canal."""
+def nome_canal_seguro(texto: str, limite: int = 100) -> str:
     texto = re.sub(r"\s+", "-", texto.strip())
     texto = re.sub(r"-{2,}", "-", texto)
     texto = texto.strip("-")
     return texto[:limite] or "ticket"
 
 
-async def obter_categoria(guild, categoria_id):
+async def obter_categoria(guild: discord.Guild, categoria_id: int):
     categoria = guild.get_channel(categoria_id)
     if categoria is None:
         try:
@@ -194,7 +221,7 @@ async def obter_categoria(guild, categoria_id):
     return None
 
 
-def permissões_canal_privado(guild, utilizador):
+def permissões_canal_privado(guild: discord.Guild, utilizador: discord.Member):
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         utilizador: discord.PermissionOverwrite(
@@ -219,14 +246,80 @@ def permissões_canal_privado(guild, utilizador):
 
 
 # =========================================================
-# SISTEMA 1 — CRIAR ABAS
+# DISPONIBILIDADE
+# =========================================================
+
+async def obter_canal_votacoes(guild: discord.Guild, canal_id: int | None = None):
+    canal_id_final = canal_id or obter_canal_disponibilidade_id(guild.id)
+
+    if canal_id_final is None:
+        raise RuntimeError(
+            f"O canal de disponibilidade não está configurado para o servidor {guild.name} ({guild.id})."
+        )
+
+    canal = guild.get_channel(canal_id_final)
+
+    if canal is None:
+        try:
+            canal = await guild.fetch_channel(canal_id_final)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            raise RuntimeError(f"O canal ID {canal_id_final} não foi encontrado ou não está acessível no servidor {guild.name}.")
+
+    if not isinstance(canal, discord.TextChannel):
+        raise RuntimeError("O ID indicado não corresponde a um canal de texto.")
+
+    return canal
+
+
+async def publicar_votacoes_reacoes(guild: discord.Guild, canal_id: int | None = None):
+    canal = await obter_canal_votacoes(guild, canal_id)
+    data = datetime.now(FUSO_HORARIO).strftime("%d/%m/%Y")
+
+    await canal.send(
+        f"# {data}\n"
+        "Vota conforme a tua disponibilidade."
+    )
+
+    for horario in HORARIOS:
+        mensagem = await canal.send(f"**🕒 {horario}**")
+        await mensagem.add_reaction("☑️")
+        await mensagem.add_reaction("❌")
+
+
+@tasks.loop(time=time(hour=0, minute=0, tzinfo=FUSO_HORARIO))
+async def enviar_votacoes_diarias():
+    for guild in bot.guilds:
+        try:
+            canal_id = obter_canal_disponibilidade_id(guild.id)
+            if canal_id:
+                await publicar_votacoes_reacoes(guild, canal_id)
+                print(f"Votações diárias publicadas no servidor: {guild.name} ({guild.id})")
+        except Exception as erro:
+            print(f"Erro ao publicar votações automáticas no servidor {guild.name} ({guild.id}): {erro}")
+
+
+@enviar_votacoes_diarias.before_loop
+async def antes_das_votacoes():
+    await bot.wait_until_ready()
+
+
+# =========================================================
+# CRIAR ABAS
 # =========================================================
 
 class CriarAbaView(discord.ui.View):
-    def __init__(self, categoria_id=None, prefixo=""):
+    def __init__(
+        self,
+        guild_id: int,
+        categoria_id: int | None = None,
+        prefixo: str = "",
+        mensagem_inicial: str | None = None
+    ):
         super().__init__(timeout=None)
+        self.guild_id = guild_id
         self.categoria_id = categoria_id
         self.prefixo = prefixo or ""
+        self.mensagem_inicial = mensagem_inicial
 
     @discord.ui.button(
         label="Criar Aba",
@@ -234,20 +327,26 @@ class CriarAbaView(discord.ui.View):
         emoji="📁",
         custom_id="staffflow:criar_aba"
     )
-    async def criar_aba(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def criar_aba(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
         guild = interaction.guild
         utilizador = interaction.user
 
-        if guild is None or not isinstance(utilizador, discord.Member):
+        if guild is None or guild.id != self.guild_id or not isinstance(utilizador, discord.Member):
             await interaction.response.send_message(
-                "Este botão só pode ser utilizado num servidor.",
+                "Este painel não pertence a este servidor ou esta interação é inválida.",
                 ephemeral=True
             )
             return
 
         categoria = None
+
         if self.categoria_id is not None:
             categoria = await obter_categoria(guild, self.categoria_id)
+
             if categoria is None:
                 await interaction.response.send_message(
                     "A categoria configurada já não existe ou não pertence a este servidor.",
@@ -278,9 +377,21 @@ class CriarAbaView(discord.ui.View):
                 topic=f"staffflow_owner:{utilizador.id}",
                 reason=f"Aba privada criada por {utilizador}"
             )
+
+            if self.mensagem_inicial:
+                await canal.send(
+                    f"{utilizador.mention}\n{self.mensagem_inicial}",
+                    allowed_mentions=discord.AllowedMentions(users=True)
+                )
+            else:
+                await canal.send(
+                    f"Aba privada criada para {utilizador.mention}.",
+                    allowed_mentions=discord.AllowedMentions(users=True)
+                )
+
         except discord.Forbidden:
             await interaction.response.send_message(
-                "Não tenho permissões para criar canais. Verifica a permissão Gerir Canais.",
+                "Não tenho permissões para criar canais ou enviar mensagens.",
                 ephemeral=True
             )
             return
@@ -297,73 +408,140 @@ class CriarAbaView(discord.ui.View):
         )
 
 
-# =========================================================
-# SISTEMA 2 — DISPONIBILIDADE (TEXTO + REACOES)
-# =========================================================
+class MensagemInicialAbaModal(discord.ui.Modal):
+    def __init__(self, setup_view):
+        super().__init__(title="Mensagem automática da aba")
+        self.setup_view = setup_view
 
-async def obter_canal_votacoes(canal_id=None):
-    canal_id = canal_id or obter_canal_disponibilidade_id()
-
-    if canal_id is None:
-        raise RuntimeError(
-            "O canal de disponibilidade ainda não foi configurado. "
-            "Executa /disponibilidade e indica o ID do canal."
+        self.mensagem = discord.ui.TextInput(
+            label="Mensagem enviada ao abrir uma aba",
+            placeholder="Olá! A equipa irá ajudar-te em breve.",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=2000
         )
 
-    canal = bot.get_channel(canal_id)
+        self.add_item(self.mensagem)
 
-    if canal is None:
-        canal = await bot.fetch_channel(canal_id)
+    async def on_submit(self, interaction: discord.Interaction):
+        self.setup_view.mensagem_inicial = str(
+            self.mensagem.value
+        ).strip()
 
-    if not isinstance(canal, discord.TextChannel):
-        raise RuntimeError(
-            "O ID indicado não corresponde a um canal de texto."
+        await interaction.response.send_message(
+            "Mensagem automática configurada com sucesso!",
+            ephemeral=True
         )
 
-    return canal
 
-async def publicar_votacoes_reacoes(canal_id=None):
-    canal = await obter_canal_votacoes(canal_id)
-    data = datetime.now(FUSO_HORARIO).strftime("%d/%m/%Y")
+class CriarAbasSetupView(discord.ui.View):
+    def __init__(
+        self,
+        guild_id: int,
+        categoria_id: int | None,
+        prefixo: str,
+        titulo: str,
+        texto: str,
+        mensagem_inicial: str | None = None
+    ):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.categoria_id = categoria_id
+        self.prefixo = prefixo or ""
+        self.titulo = titulo
+        self.texto = texto
+        self.mensagem_inicial = mensagem_inicial
 
-    # Mensagem introdutória
-    await canal.send(
-        f"# {data}\n"
-        "Vota conforme a tua disponibilidade."
+    @discord.ui.button(
+        label="Configurar mensagem automática",
+        emoji="💬",
+        style=discord.ButtonStyle.primary
     )
-
-    # Publicação dos horários
-    for horario in HORARIOS:
-        mensagem = await canal.send(
-            f"**🕒 {horario}**"
+    async def configurar_mensagem(self, interaction, button):
+        await interaction.response.send_modal(
+            MensagemInicialAbaModal(self)
         )
 
-        await mensagem.add_reaction("☑️")
-        await mensagem.add_reaction("❌")
+    @discord.ui.button(
+        label="Publicar painel",
+        emoji="📁",
+        style=discord.ButtonStyle.success
+    )
+    async def publicar(self, interaction, button):
+        guild = interaction.guild
 
+        if guild is None or guild.id != self.guild_id:
+            await interaction.response.send_message(
+                "Este comando só pode ser utilizado no servidor de origem.",
+                ephemeral=True
+            )
+            return
 
-@tasks.loop(time=time(hour=0, minute=0, tzinfo=FUSO_HORARIO))
-async def enviar_votacoes_diarias():
-    try:
-        await publicar_votacoes_reacoes()
-        print("Votações diárias publicadas.")
-    except Exception as erro:
-        print(f"Erro ao publicar votações automáticas: {erro}")
+        if interaction.channel is None:
+            await interaction.response.send_message(
+                "Não foi possível identificar o canal onde publicar o painel.",
+                ephemeral=True
+            )
+            return
 
+        await interaction.response.defer(ephemeral=True)
 
-@enviar_votacoes_diarias.before_loop
-async def antes_das_votacoes():
-    await bot.wait_until_ready()
+        embed = criar_embed_abas(self.texto, self.titulo)
+
+        view = CriarAbaView(
+            guild_id=self.guild_id,
+            categoria_id=self.categoria_id,
+            prefixo=self.prefixo,
+            mensagem_inicial=self.mensagem_inicial
+        )
+
+        try:
+            # Publica apenas a embed e a view, sem anexar imagens
+            mensagem = await interaction.channel.send(
+                embed=embed,
+                view=view
+            )
+
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Não tenho permissões para publicar o painel neste canal.",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException as erro:
+            await interaction.followup.send(
+                f"Não foi possível publicar o painel: {erro}",
+                ephemeral=True
+            )
+            return
+
+        guardar_painel_abas(
+            mensagem.id,
+            self.guild_id,
+            self.categoria_id,
+            self.prefixo,
+            self.mensagem_inicial
+        )
+
+        bot.add_view(view, message_id=mensagem.id)
+
+        await interaction.followup.send(
+            "Painel de criação de abas publicado com sucesso!",
+            ephemeral=True
+        )
+
+        self.stop()
 
 
 # =========================================================
-# SISTEMA 3 — TICKET TOOL
+# TICKET TOOL
 # =========================================================
 
 class TicketToolView(discord.ui.View):
-    def __init__(self, panel_id, category_id, buttons):
+    def __init__(self, panel_id: str, guild_id: int, category_id: int, buttons: list):
         super().__init__(timeout=None)
         self.panel_id = panel_id
+        self.guild_id = guild_id
         self.category_id = category_id
         self.buttons_config = buttons
 
@@ -381,13 +559,13 @@ class TicketToolView(discord.ui.View):
             botao.callback = callback
             self.add_item(botao)
 
-    async def criar_ticket(self, interaction, button_index):
+    async def criar_ticket(self, interaction: discord.Interaction, button_index: int):
         guild = interaction.guild
         utilizador = interaction.user
 
-        if guild is None or not isinstance(utilizador, discord.Member):
+        if guild is None or guild.id != self.guild_id or not isinstance(utilizador, discord.Member):
             await interaction.response.send_message(
-                "Este botão só pode ser utilizado num servidor.",
+                "Este botão pertence a outro servidor ou a interação é inválida.",
                 ephemeral=True
             )
             return
@@ -440,21 +618,19 @@ class TicketToolView(discord.ui.View):
             return
 
         cargos_ids = config.get("admin_role_ids", [])
-
         mencoes_cargos = []
 
         for cargo_id in cargos_ids:
             cargo = guild.get_role(cargo_id)
-
             if cargo is not None:
                 mencoes_cargos.append(cargo.mention)
 
-        mencoes_cargos_texto = " ".join(mencoes_cargos)
+        mencoes_cargos_texto = (" " + " ".join(mencoes_cargos)) if mencoes_cargos else ""
 
         await canal.send(
             f"Obrigado por abrires um ticket, {utilizador.mention}!\n"
-            "A equipa irá responder assim que possível.\n"
-            f"{mencoes_cargos_texto}"
+            f"A equipa irá responder assim que possível.{mencoes_cargos_texto}",
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True)
         )
 
         await interaction.response.send_message(
@@ -511,7 +687,6 @@ class TicketButtonModal(discord.ui.Modal):
         self.setup_view.atualizar_botoes()
 
         try:
-            # Edita a resposta efémera que contém o assistente de configuração.
             if self.setup_view.interaction is not None:
                 await self.setup_view.interaction.edit_original_response(
                     view=self.setup_view
@@ -526,7 +701,7 @@ class TicketButtonModal(discord.ui.Modal):
 
 
 class TicketSetupView(discord.ui.View):
-    def __init__(self, guild_id, category_id, title, description, quantidade):
+    def __init__(self, guild_id: int, category_id: int, title: str, description: str, quantidade: int):
         super().__init__(timeout=900)
         self.guild_id = guild_id
         self.category_id = category_id
@@ -613,7 +788,6 @@ class TicketSetupView(discord.ui.View):
         panel_id = uuid.uuid4().hex[:12]
         embed = criar_embed_ticket(self.title, self.description)
 
-        # Guardar os cargos selecionados em cada botão
         buttons_config = [
             {
                 **botao,
@@ -623,9 +797,10 @@ class TicketSetupView(discord.ui.View):
         ]
 
         view = TicketToolView(
-            panel_id,
-            self.category_id,
-            buttons_config
+            panel_id=panel_id,
+            guild_id=self.guild_id,
+            category_id=self.category_id,
+            buttons=buttons_config
         )
 
         try:
@@ -663,21 +838,31 @@ class TicketSetupView(discord.ui.View):
 
 
 # =========================================================
-# BOT — CRIADO ANTES DOS COMANDOS SLASH
+# BOT — CLASSE PRINCIPAL
 # =========================================================
 
 class StaffFlowBot(commands.Bot):
     async def setup_hook(self):
         iniciar_database()
 
-        # Restaurar os painéis persistentes de criação de abas.
-        for message_id, guild_id, categoria_id, prefixo in obter_paineis_abas():
+        for (
+            message_id,
+            guild_id,
+            categoria_id,
+            prefixo,
+            mensagem_inicial
+        ) in obter_paineis_abas():
+
             self.add_view(
-                CriarAbaView(categoria_id, prefixo),
+                CriarAbaView(
+                    guild_id=guild_id,
+                    categoria_id=categoria_id,
+                    prefixo=prefixo,
+                    mensagem_inicial=mensagem_inicial
+                ),
                 message_id=message_id
             )
 
-        # Restaurar os painéis persistentes Ticket Tool.
         for painel in obter_ticket_panels():
             (
                 panel_id, guild_id, channel_id, message_id,
@@ -687,7 +872,12 @@ class StaffFlowBot(commands.Bot):
             try:
                 buttons = json.loads(buttons_json)
                 self.add_view(
-                    TicketToolView(panel_id, category_id, buttons),
+                    TicketToolView(
+                        panel_id=panel_id,
+                        guild_id=guild_id,
+                        category_id=category_id,
+                        buttons=buttons
+                    ),
                     message_id=message_id
                 )
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as erro:
@@ -704,9 +894,81 @@ bot = StaffFlowBot(command_prefix="!", intents=intents)
 
 
 # =========================================================
-# COMANDO /CRIAR_ABAS
+# COMANDOS SLASH (ORDEM ALFABÉTICA)
 # =========================================================
 
+# 1. /ajuda
+@bot.tree.command(
+    name="ajuda",
+    description="Exibe a lista e explicação de todos os comandos de administração do StaffFlow"
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(administrator=True)
+async def ajuda(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📚 Central de Ajuda • StaffFlow",
+        description=(
+            "Bem-vindo ao painel de administração do **StaffFlow**!\n"
+            "Todos os comandos listados abaixo exigem permissões de **Administrador**.\n\n"
+            "Consulta abaixo a utilidade e instruções de cada comando:"
+        ),
+        color=COR_EMBED
+    )
+
+    embed.add_field(
+        name="1️⃣ `/ajuda`",
+        value=(
+            "• **Para que serve:** Apresenta este menu explicativo.\n"
+            "• **Como usar:** `/ajuda`\n"
+            "• **Permissões:** Administrador."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="2️⃣ `/criar_abas`",
+        value=(
+            "• **Para que serve:** Publica o painel de criação de abas/canais privados para os utilizadores.\n"
+            "• **Como usar:** `/criar_abas [texto] [titulo] [categoria_id] [prefixo]`\n"
+            "• **Permissões:** Administrador."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="3️⃣ `/disponibilidade`",
+        value=(
+            "• **Para que serve:** Configura o canal de disponibilidades do servidor e publica as 15 votações diárias.\n Deve ser usado uma primeira vez para configurar o canal, e depois pode ser usado novamente para publicar as votações automaticamente à meia noite.\n"
+            "• **Como usar:** `/disponibilidade canal_id:<ID>`\n"
+            "• **Permissões:** Administrador."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="4️⃣ `/ticket_tool`",
+        value=(
+            "• **Para que serve:** Cria um painel interativo de suporte por tickets com botões personalizados e menção de cargos.\n"
+            "• **Como usar:** `/ticket_tool titulo:<txt> descricao:<txt> categoria_id:<ID> quantidade:<1-25>`\n"
+            "• **Permissões:** Administrador."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="StaffFlow • Gestão e Organização Discord")
+
+    ficheiro = None
+    if IMAGE_PATH.is_file():
+        ficheiro = discord.File(str(IMAGE_PATH), filename="StaffFlow-Redonda.png")
+        embed.set_thumbnail(url="attachment://StaffFlow-Redonda.png")
+
+    if ficheiro:
+        await interaction.response.send_message(embed=embed, file=ficheiro, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# 2. /criar_abas
 @bot.tree.command(
     name="criar_abas",
     description="Publicar um painel para criar abas privadas"
@@ -727,6 +989,7 @@ async def criar_abas(
     prefixo: str | None = None
 ):
     guild = interaction.guild
+
     if guild is None:
         await interaction.response.send_message(
             "Este comando só pode ser utilizado num servidor.",
@@ -745,6 +1008,7 @@ async def criar_abas(
         return
 
     categoria = None
+
     if categoria_id:
         try:
             categoria = await obter_categoria(guild, int(categoria_id))
@@ -758,55 +1022,33 @@ async def criar_abas(
             )
             return
 
-    await interaction.response.defer(ephemeral=True)
-
-    embed = criar_embed_abas(texto_final, titulo_final)
-    view = CriarAbaView(
+    view = CriarAbasSetupView(
+        guild_id=guild.id,
         categoria_id=categoria.id if categoria else None,
-        prefixo=prefixo or ""
+        prefixo=prefixo or "",
+        titulo=titulo_final,
+        texto=texto_final
     )
 
-    try:
-        if IMAGE_PATH.is_file():
-            ficheiro = discord.File(str(IMAGE_PATH), filename="StaffFlow-Redonda.png")
-            embed.set_thumbnail(url="attachment://StaffFlow-Redonda.png")
-            mensagem = await interaction.channel.send(
-                embed=embed, file=ficheiro, view=view
-            )
-        else:
-            print(f"Imagem não encontrada: {IMAGE_PATH}")
-            mensagem = await interaction.channel.send(embed=embed, view=view)
-    except discord.Forbidden:
-        await interaction.followup.send(
-            "Não tenho permissões para enviar mensagens ou embeds neste canal.",
-            ephemeral=True
-        )
-        return
-    except discord.HTTPException as erro:
-        await interaction.followup.send(
-            f"Não foi possível publicar o painel: {erro}",
-            ephemeral=True
-        )
-        return
-
-    guardar_painel_abas(
-        mensagem.id,
-        guild.id,
-        categoria.id if categoria else None,
-        prefixo or ""
+    embed = criar_embed_abas(
+        texto_final,
+        titulo_final
     )
-    bot.add_view(view, message_id=mensagem.id)
 
-    await interaction.followup.send(
-        "Painel de criação de abas publicado com sucesso!",
+    await interaction.response.send_message(
+        content=(
+            "**Configuração do painel de criação de abas**\n\n"
+            "Podes configurar a mensagem automática que será enviada "
+            "quando um utilizador abrir uma aba.\n\n"
+            "Quando terminares, carrega em **Publicar painel**."
+        ),
+        embed=embed,
+        view=view,
         ephemeral=True
     )
 
 
-# =========================================================
-# COMANDO /DISPONIBILIDADE
-# =========================================================
-
+# 3. /disponibilidade
 @bot.tree.command(
     name="disponibilidade",
     description="Configurar o canal e publicar as votações"
@@ -820,20 +1062,25 @@ async def disponibilidade(
     interaction: discord.Interaction,
     canal_id: str
 ):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Este comando só pode ser utilizado num servidor.",
+            ephemeral=True
+        )
+        return
+
     await interaction.response.defer(ephemeral=True)
 
     try:
         canal_id_int = int(canal_id)
+        canal = await obter_canal_votacoes(guild, canal_id_int)
 
-        canal = await obter_canal_votacoes(canal_id_int)
-
-        # Guardar o canal para as próximas publicações automáticas
-        guardar_canal_disponibilidade(canal.id)
-
-        await publicar_votacoes_reacoes(canal.id)
+        guardar_canal_disponibilidade(guild.id, canal.id)
+        await publicar_votacoes_reacoes(guild, canal.id)
 
         await interaction.followup.send(
-            f"As 15 votações foram publicadas em {canal.mention}!",
+            f"As 15 votações foram publicadas em {canal.mention} e a configuração foi guardada com sucesso!",
             ephemeral=True
         )
 
@@ -842,25 +1089,21 @@ async def disponibilidade(
             "O ID do canal tem de ser um número válido.",
             ephemeral=True
         )
-
     except (
         discord.NotFound,
         discord.Forbidden,
         discord.HTTPException,
         RuntimeError
     ) as erro:
-        print(f"Erro ao publicar disponibilidade: {erro}")
-
+        print(f"Erro ao publicar disponibilidade no servidor {guild.id}: {erro}")
         await interaction.followup.send(
             "Não foi possível publicar as votações. "
-            "Confirma o ID do canal e as permissões do bot.",
+            "Confirma o ID do canal e as permissões do bot neste servidor.",
             ephemeral=True
         )
 
-# =========================================================
-# COMANDO /TICKET_TOOL
-# =========================================================
 
+# 4. /ticket_tool
 @bot.tree.command(
     name="ticket_tool",
     description="Criar um painel Ticket Tool personalizado"
