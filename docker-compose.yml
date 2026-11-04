@@ -1,0 +1,12 @@
+services:
+  staffflow:
+    build: .
+    container_name: staffflow-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - staffflow_data:/data
+
+volumes:
+  staffflow_data:
