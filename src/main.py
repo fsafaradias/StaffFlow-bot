@@ -37,7 +37,7 @@ if not token:
     raise RuntimeError("DISCORD_TOKEN não está configurado!")
 
 IMAGE_PATH = PROJECT_DIR / "img" / "StaffFlow-Redonda.png"
-DATABASE_PATH = PROJECT_DIR / "staffflow.db"
+DATABASE_PATH = Path("/data/staffflow.db")
 
 HORARIOS = [
     "10:00", "11:00", "12:00", "13:00", "14:00",
