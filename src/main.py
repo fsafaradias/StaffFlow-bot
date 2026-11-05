@@ -591,15 +591,13 @@ class TicketToolView(discord.ui.View):
                 )
                 return
 
-        emoji = config["emoji"] or "🎫"
-        
         # --- CONFIGURAÇÃO DO NOME DO CANAL ---
-        prefixo = "ticket-"                  # Podes alterar o prefixo aqui se quiseres
-        nome_categoria_botao = config["label"] # Nome que está no botão (ex: Suporte, Denúncia)
+        emoji_prefixo = config["emoji"] or "🎫"     # Emoji escolhido (funciona como prefixo)
+        nome_categoria_botao = config["label"]     # Nome da categoria/botão
         
-        # Junta: Prefixo + Nome da Categoria + Nome do Utilizador
-        nome_bruto = f"{prefixo}{nome_categoria_botao}-{utilizador.display_name}"
-        nome = nome_canal_seguro(f"{emoji}{nome_bruto}")
+        # Junta: Emoji (Prefix) + Nome da Categoria + Nome do Utilizador
+        nome_bruto = f"{emoji_prefixo}{nome_categoria_botao}-{utilizador.display_name}"
+        nome = nome_canal_seguro(nome_bruto)
         # -------------------------------------
 
         try:
@@ -644,7 +642,6 @@ class TicketToolView(discord.ui.View):
             f"O teu ticket foi criado com sucesso: {canal.mention}",
             ephemeral=True
         )
-
 class TicketButtonModal(discord.ui.Modal):
     def __init__(self, setup_view):
         super().__init__(title=f"Configurar botão {len(setup_view.buttons) + 1}")
