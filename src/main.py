@@ -292,10 +292,10 @@ async def enviar_votacoes_diarias():
             canal_id = obter_canal_disponibilidade_id(guild.id)
             if canal_id:
                 await publicar_votacoes_reacoes(guild, canal_id)
-                print(f"Votações diárias publicadas no servidor: {guild.name} ({guild.id})")
+                # Print adicionado para o envio automático diário
+                print(f"Disponibilidades enviadas para o servidor: {guild.name}")
         except Exception as erro:
             print(f"Erro ao publicar votações automáticas no servidor {guild.name} ({guild.id}): {erro}")
-
 
 @enviar_votacoes_diarias.before_loop
 async def antes_das_votacoes():
@@ -1050,6 +1050,67 @@ async def criar_abas(
         ephemeral=True
     )
 
+# me only. /dashboard
+@bot.tree.command(
+    name="dashboard",
+    description="Exibe as estatísticas gerais do StaffFlow"
+)
+@app_commands.guild_only()
+async def dashboard(interaction: discord.Interaction):
+    # Verificar estritamente se é o utilizador autorizado
+    if interaction.user.id != 418709114231717889:
+        await interaction.response.send_message(
+            "Não tens permissão para utilizar este comando.",
+            ephemeral=True
+        )
+        return
+
+    # Recolher estatísticas da base de dados e do bot
+    total_servidores = len(bot.guilds)
+    
+    try:
+        with sqlite3.connect(DATABASE_PATH) as db:
+            total_paineis_abas = db.execute("SELECT COUNT(*) FROM paineis_abas_staffflow").fetchone()[0]
+            total_paineis_tickets = db.execute("SELECT COUNT(*) FROM ticket_panels").fetchone()[0]
+            total_configs_disponibilidade = db.execute("SELECT COUNT(*) FROM configuracao_disponibilidade").fetchone()[0]
+    except Exception:
+        total_paineis_abas = 0
+        total_paineis_tickets = 0
+        total_configs_disponibilidade = 0
+
+    embed = discord.Embed(
+        title="📊 Dashboard • StaffFlow Estatísticas",
+        description="Painel de controlo restrito com as principais métricas do bot.",
+        color=COR_EMBED
+    )
+
+    embed.add_field(
+        name="🌐 Servidores",
+        value=f"• Conectado a **{total_servidores}** servidores",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📁 Sistema de Abas",
+        value=f"• Paineis de abas ativos: **{total_paineis_abas}**",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🎫 Sistema de Tickets",
+        value=f"• Paineis de tickets ativos: **{total_paineis_tickets}**",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🕒 Disponibilidades",
+        value=f"• Servidores configurados: **{total_configs_disponibilidade}**",
+        inline=False
+    )
+
+    embed.set_footer(text=f"Acedido por {interaction.user} • StaffFlow")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # 3. /disponibilidade
 @bot.tree.command(
@@ -1082,6 +1143,9 @@ async def disponibilidade(
         guardar_canal_disponibilidade(guild.id, canal.id)
         await publicar_votacoes_reacoes(guild, canal.id)
 
+        # Print adicionado para o comando manual
+        print(f"Disponibilidades enviadas para o servidor: {guild.name}")
+
         await interaction.followup.send(
             f"As 15 votações foram publicadas em {canal.mention} e a configuração foi guardada com sucesso!",
             ephemeral=True
@@ -1104,7 +1168,6 @@ async def disponibilidade(
             "Confirma o ID do canal e as permissões do bot neste servidor.",
             ephemeral=True
         )
-
 
 # 4. /ticket_tool
 @bot.tree.command(
