@@ -592,7 +592,15 @@ class TicketToolView(discord.ui.View):
                 return
 
         emoji = config["emoji"] or "🎫"
-        nome = nome_canal_seguro(f"{emoji}{utilizador.display_name}")
+        
+        # --- CONFIGURAÇÃO DO NOME DO CANAL ---
+        prefixo = "ticket-"                  # Podes alterar o prefixo aqui se quiseres
+        nome_categoria_botao = config["label"] # Nome que está no botão (ex: Suporte, Denúncia)
+        
+        # Junta: Prefixo + Nome da Categoria + Nome do Utilizador
+        nome_bruto = f"{prefixo}{nome_categoria_botao}-{utilizador.display_name}"
+        nome = nome_canal_seguro(f"{emoji}{nome_bruto}")
+        # -------------------------------------
 
         try:
             canal = await guild.create_text_channel(
@@ -636,7 +644,6 @@ class TicketToolView(discord.ui.View):
             f"O teu ticket foi criado com sucesso: {canal.mention}",
             ephemeral=True
         )
-
 
 class TicketButtonModal(discord.ui.Modal):
     def __init__(self, setup_view):
